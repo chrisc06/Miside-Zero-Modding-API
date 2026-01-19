@@ -27,5 +27,5 @@ A lightweight **C++ modding API** for a Unity (IL2CPP) game, built to save time 
 - Main-thread task queue (`RunOnMainThread`)
 
 ## Notes
-- Offsets are handled automatically — **no updating them manually**.
-- Project is still in progress; expect changes.
+- Offsets are handled automatically - **no updating them manually**.
+- Project is still in progress, so expect changes.
