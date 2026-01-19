@@ -2,7 +2,7 @@
 
 # ⚠️ This project is still conisdered WIP and alot has to be added. It works but its limited.
 
-A lightweight **C++ modding API** for a Unity (IL2CPP) game, built for quickly making mods.
+A lightweight **C++ modding API** for a Unity (IL2CPP) game, built to save time while making mods for the game.
 
 ## Highlights
 - **No manual offsets**: address/offset scanning is **automatic** (auto-updating), It will always work unless the game developer changes method names.
