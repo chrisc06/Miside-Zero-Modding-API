@@ -63,8 +63,7 @@ namespace MSZ_API {
                 LogE("[Trace] GetTransform: Hook is missing");
                 return nullptr;
             }
-
-            // Attempt to fetch the transform
+            
             void* result = Hook::Unity::GetTransform(unityObject);
 
             if (!result) {
