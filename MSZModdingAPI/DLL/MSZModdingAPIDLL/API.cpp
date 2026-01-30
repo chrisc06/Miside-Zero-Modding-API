@@ -25,7 +25,6 @@ namespace MSZ_API {
     std::mutex queueMutex;
     bool Initialized = false;
 
-    // --- ADD THIS FUNCTION HERE ---
     // This scans the process memory to find every mod the Launcher injected
     std::vector<ActiveMod> GetLoadedMods() {
         std::vector<ActiveMod> mods;
@@ -99,7 +98,6 @@ namespace MSZ_API {
                 return nullptr;
             }
 
-            // Attempt to fetch the transform
             void* result = Hook::Unity::GetTransform(unityObject);
 
             if (!result) {
