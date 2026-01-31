@@ -9,8 +9,6 @@
 #include "API.h"
 #include "Hook.h"
 #include "IL2CPP_Helper.h"
-#include <metahost.h>
-#include <mscoree.h>
 #include <filesystem>
 #include <vector>
 #include <fstream>

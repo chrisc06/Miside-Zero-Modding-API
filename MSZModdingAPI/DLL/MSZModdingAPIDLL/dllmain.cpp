@@ -4,10 +4,10 @@
 
 #include <windows.h>
 #include <d3d11.h>
-#include "MinHook.h" 
 #include "API.h"
 #include "Hook.h"
 #include "CrashHandler.h"
+#include <core.hpp>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "user32.lib")
@@ -26,16 +26,13 @@ bool g_Init = false;
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-
     if (MSZ_API::UI::IsMenuOpen()) {
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
             return true;
     }
-
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         MSZ_API::UI::ToggleMenu();
     }
-
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
@@ -85,6 +82,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
+
 uintptr_t GetD3D11PresentAddress() {
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, DefWindowProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "DX11 Dummy", NULL };
     RegisterClassEx(&wc);
@@ -120,20 +118,24 @@ uintptr_t GetD3D11PresentAddress() {
 }
 
 void InitDirectXHook() {
+    static cell::transaction dx_cell;
     uintptr_t presentAddr = GetD3D11PresentAddress();
     if (presentAddr) {
-        if (MH_CreateHook((LPVOID)presentAddr, &hkPresent, (LPVOID*)&oPresent) == MH_OK) {
-            MH_EnableHook((LPVOID)presentAddr);
+        dx_cell.add((LPVOID)presentAddr, &hkPresent, (LPVOID*)&oPresent);
+
+        if (dx_cell.commit() == cell::status::success) {
             LogI("DirectX Present Hooked.");
+            return;
         }
         else {
-            LogE("MinHook failed to hook Present.");
+            LogE("CellHook failed to hook Present.");
         }
     }
     else {
         LogE("Failed to find Present Address.");
     }
 }
+
 void InitConsole() {
     if (!AllocConsole()) return;
     FILE* f;
@@ -146,7 +148,6 @@ void InitConsole() {
 
 void MainThread(HMODULE hModule) {
     InitConsole();
-
     LogI("Core API Injected. Waiting for GameAssembly.dll...");
 
     HMODULE hGameAssembly = NULL;
@@ -155,8 +156,7 @@ void MainThread(HMODULE hModule) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    Hook::InitAll((uintptr_t) hGameAssembly);
-
+    Hook::InitAll((uintptr_t)hGameAssembly);
     InitDirectXHook();
 
     while (true) Sleep(100);
@@ -169,8 +169,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
         CreateThread(0, 0, (LPTHREAD_START_ROUTINE)MainThread, hModule, 0, 0);
         break;
     case DLL_PROCESS_DETACH:
-        MH_DisableHook(MH_ALL_HOOKS);
-        MH_Uninitialize();
         break;
     }
     return TRUE;

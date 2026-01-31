@@ -1,2 +1,18 @@
-﻿  Hook.cpp
+﻿  API.cpp
+  core.cpp
+  hde.cpp
+  memory.cpp
+  utils.cpp
+  CrashHandler.cpp
+  dllmain.cpp
+  Hook.cpp
+  imgui_impl_dx11.cpp
+  imgui_impl_win32.cpp
+  imgui.cpp
+  imgui_draw.cpp
+  imgui_tables.cpp
+  imgui_widgets.cpp
+  Scanner.cpp
+  Generating Code...
+     Creating library C:\Users\chris\source\repos\MSZModdingAPIDLL\x64\Debug\MSZModdingAPIDLL.lib and object C:\Users\chris\source\repos\MSZModdingAPIDLL\x64\Debug\MSZModdingAPIDLL.exp
   MSZModdingAPIDLL.vcxproj -> C:\Users\chris\source\repos\MSZModdingAPIDLL\x64\Debug\MSZModdingAPIDLL.dll

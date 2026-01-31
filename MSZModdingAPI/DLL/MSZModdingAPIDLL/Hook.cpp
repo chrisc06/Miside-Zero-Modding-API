@@ -1,9 +1,10 @@
 #include "Hook.h"
-#include "MinHook.h"
 #include "Offsets.h"
 #include "API.h"
 #include "IL2CPP_Helper.h"
 #include "Scanner.h"
+#include <algorithm>
+#include <core.hpp> // CellHook
 
 namespace Hook {
     namespace Unity {
@@ -51,7 +52,8 @@ namespace Hook {
         set_useGravity_t SetUseGravity = nullptr;
         set_isKinematic_t SetIsKinematic = nullptr;
         LoadScene_t LoadScene = nullptr;
-        void SetGlobalFloat_Hook(int nameString, float value){
+
+        void SetGlobalFloat_Hook(int nameString, float value) {
             MSZ_API::ProcessMainThreadTasks();
             oSetGlobalFloat(nameString, value);
         }
@@ -62,9 +64,7 @@ namespace Hook {
     void KillGame(const char* reason) {
         char msg[512];
         sprintf_s(msg, "SECURITY VIOLATION DETECTED!\n\nReason: %s\n\nThe game process will now terminate to protect your system.", reason);
-
         MessageBoxA(NULL, msg, "Security Guard", MB_OK | MB_ICONHAND | MB_SYSTEMMODAL);
-
         TerminateProcess(GetCurrentProcess(), 1);
     }
 
@@ -78,38 +78,20 @@ namespace Hook {
         std::transform(sPath.begin(), sPath.end(), sPath.begin(), ::tolower);
 
         // --- THE EXPANDED WHITELIST ---
-
-        // 1. Game Directory
         std::string sGameDir = g_GameDir;
         std::transform(sGameDir.begin(), sGameDir.end(), sGameDir.begin(), ::tolower);
         if (sPath.find(sGameDir) == 0) return true;
 
-        // 2. Windows System Files (Required for DirectX/Drivers)
         if (sPath.find("c:\\windows\\") == 0) return true;
-
-        // 3. NEW: ProgramData (Used by NVIDIA ShadowPlay, Steam, etc.)
         if (sPath.find("c:\\programdata\\") == 0) return true;
 
-        // 4. NEW: Temp Folder (Used by many legitimate libraries)
         char tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
         std::string sTemp = tempPath;
         std::transform(sTemp.begin(), sTemp.end(), sTemp.begin(), ::tolower);
         if (sPath.find(sTemp) == 0) return true;
 
-        // 5. NEW: Common Redistributables / Steam
-        if (sPath.find("program files") != std::string::npos) {
-            // You can be more specific here if you want to block everything 
-            // except the Steam overlay, but usually Program Files is safe-ish 
-            // for READ access.
-            return true;
-        }
-
-        // --- THE CRITICAL BLOCKS ---
-        // We still block the most sensitive areas:
-        // C:\Users\<Name>\Documents
-        // C:\Users\<Name>\AppData (where browser cookies/Discord tokens live)
-        // C:\Users\<Name>\Desktop
+        if (sPath.find("program files") != std::string::npos) return true;
 
         return false;
     }
@@ -126,13 +108,12 @@ namespace Hook {
     CreateFileA_t        fpCreateFileA = nullptr;
     connect_t            fpConnect = nullptr;
 
-    // --- TRAP 1: ShellExecute (Stops Execution) ---
+    // --- SECURITY TRAPS ---
     HINSTANCE WINAPI Detour_ShellExecuteA(HWND hwnd, LPCSTR op, LPCSTR file, LPCSTR params, LPCSTR dir, INT show) {
         std::string sFile = file ? file : "";
         std::string lower = sFile;
         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
-        // Strict Whitelist: Only allow Web Links
         if (lower.find("http://") != 0 && lower.find("https://") != 0) {
             KillGame(("Mod attempted to execute non-web resource: " + sFile).c_str());
             return 0;
@@ -140,26 +121,19 @@ namespace Hook {
         return fpShellExecuteA(hwnd, op, file, params, dir, show);
     }
 
-    // --- TRAP 2: URLDownloadToFile (Stops Downloading) ---
     HRESULT WINAPI Detour_URLDownloadToFileA(LPUNKNOWN pCaller, LPCSTR szURL, LPCSTR szFileName, DWORD dwReserved, LPUNKNOWN lpfnCB) {
         KillGame(("Mod attempted to download file: " + std::string(szURL)).c_str());
         return E_FAIL;
     }
 
-    // --- TRAP 3: CreateFile (The File Sandbox) ---
     HANDLE WINAPI Detour_CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
-
-        // Only check if they are trying to READ or OPEN
-        // (We usually don't care about creating temp files, but reading is dangerous)
         if (!IsPathSafe(lpFileName)) {
             KillGame(("Mod attempted to read file outside Game/System folder:\n" + std::string(lpFileName)).c_str());
             return INVALID_HANDLE_VALUE;
         }
-
         return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
     }
 
-    // --- TRAP 4: Winsock Connect (Stops IP Logging) ---
     int WINAPI Detour_Connect(SOCKET s, const struct sockaddr* name, int namelen) {
         KillGame("Mod attempted to open a raw network connection (Winsock).");
         return -1;
@@ -175,7 +149,6 @@ namespace Hook {
         void __stdcall Update(void* obj) {
             if (obj) {
                 lastInstance = obj;
-
                 uintptr_t walkSpeedOffset = Scanner::Cache["kiriMoveBasic::walkSpeed"];
                 speedPtr = (float*)((uintptr_t)obj + walkSpeedOffset);
 
@@ -195,22 +168,26 @@ namespace Hook {
         kiriMoveBasic::ToggleMovement = (kiriMoveBasic::ToggleMovement_t)(gameAssembly + 0x3C9D50);
     }
 
+    void DebugDump(const char* name, void* addr) {
+        unsigned char* p = (unsigned char*)addr;
+        printf("[DEBUG] %s at %p: %02X %02X %02X %02X %02X %02X\n",
+            name, addr, p[0], p[1], p[2], p[3], p[4], p[5]);
+    }
+
     bool InitAll(uintptr_t gameAssembly) {
+        static cell::transaction game_hooks;
+        static cell::transaction security_hooks;
+
         HMODULE gameAsm = GetModuleHandleA("GameAssembly.dll");
         if (!gameAsm) {
             LogE("GameAssembly.dll not found!");
             return false;
         }
 
-        // --- Helper Macro for GetProcAddress ---
-#define GET_EXPORT(var, type, name) \
-            var = (type)GetProcAddress(gameAsm, name); \
-            if (!var) { \
-                LogE("Failed to find Export: %s", name); \
-                return false; \
-            }
+        // --- Helper Macros ---
+#define GET_EXPORT(var, type, name) var = (type)GetProcAddress(gameAsm, name); if (!var) { LogE("Failed to find Export: %s", name); return false; }
+#define GET_ICALL(var, type, name) var = (type)Unity::ResolveICall(name); if (!var) { LogE("Failed to resolve ICall: %s", name); return false; }
 
-        // 1. Resolve basic IL2CPP Exports
         GET_EXPORT(Unity::ResolveICall, Unity::il2cpp_resolve_icall_t, "il2cpp_resolve_icall");
         GET_EXPORT(Unity::domain_get, Unity::il2cpp_domain_get_t, "il2cpp_domain_get");
         GET_EXPORT(Unity::assembly_open, Unity::il2cpp_domain_assembly_open_t, "il2cpp_domain_assembly_open");
@@ -225,27 +202,14 @@ namespace Hook {
         GET_EXPORT(Unity::il2cpp_object_new, Unity::il2cpp_object_new_t, "il2cpp_object_new");
 
         Unity::il2cpp_string_new = (Unity::il2cpp_string_new_t)GetProcAddress(gameAsm, "il2cpp_string_new");
-
-        // Fallback for newer Unity versions
         if (!Unity::il2cpp_string_new) {
-            LogW("il2cpp_string_new not found, trying il2cpp_string_new_utf16...");
             Unity::il2cpp_string_new = (Unity::il2cpp_string_new_t)GetProcAddress(gameAsm, "il2cpp_string_new_utf16");
         }
-
         if (!Unity::il2cpp_string_new) {
-            LogE("CRITICAL: Failed to find any variant of il2cpp_string_new!");
+            LogE("CRITICAL: Failed to find il2cpp_string_new!");
             return false;
         }
-        // --- Helper Macro for ResolveICall ---
-#define GET_ICALL(var, type, name) \
-            var = (type)Unity::ResolveICall(name); \
-            if (!var) { \
-                LogE("Failed to resolve ICall: %s", name); \
-                LogE("Mods won't work, Report this to c___s on discord."); \
-                return false; \
-            }
 
-        // 2. Resolve Internal Engine Functions
         if (Unity::ResolveICall) {
             using namespace Unity;
             GET_ICALL(Instantiate, UnityInstantiate_t, "UnityEngine.Object::Internal_InstantiateSingle_Injected(UnityEngine.Object,UnityEngine.Vector3&,UnityEngine.Quaternion&)");
@@ -269,78 +233,70 @@ namespace Hook {
             GET_ICALL(SetTimeScale, set_timeScale_t, "UnityEngine.Time::set_timeScale(System.Single)");
             GET_ICALL(SetUseGravity, set_useGravity_t, "UnityEngine.Rigidbody::set_useGravity(System.Boolean)");
             GET_ICALL(SetIsKinematic, set_isKinematic_t, "UnityEngine.Rigidbody::set_isKinematic(System.Boolean)");
-                         
-            // 3. Initialize Scanner (Finds all addresses/offsets dynamically)
+
             Scanner::Initialize();
 
+            // =========================================================
+            // Game Hooks
+            // =========================================================
             kiriMoveBasic::ToggleMovement = (kiriMoveBasic::ToggleMovement_t)Scanner::Cache["kiriMoveBasic::ToggleMovement"];
+            void* updateAddr = (void*)Scanner::Cache["kiriMoveBasic::Update"];
+            if (updateAddr) {
+                game_hooks.add(updateAddr, &kiriMoveBasic::Update, (LPVOID*)&kiriMoveBasic::oUpdate);
+            }
+            else {
+                LogE("Critical: Scanner could not find address for kiriMoveBasic::Update");
+            }
 
-            uintptr_t findObjAddr = Scanner::GetMethod("UnityEngine.CoreModule", "UnityEngine", "Object", "FindObjectOfType", 2);
+            auto setGlobalFloatAddr = Unity::ResolveICall("UnityEngine.Shader::SetGlobalFloatImpl(System.Int32,System.Single)");
+            if (!setGlobalFloatAddr) setGlobalFloatAddr = Unity::ResolveICall("UnityEngine.Shader::SetGlobalFloat(System.Int32,System.Single)");
+            if (setGlobalFloatAddr) {
+                game_hooks.add(setGlobalFloatAddr, &Unity::SetGlobalFloat_Hook, (LPVOID*)&Unity::oSetGlobalFloat);
+            }
 
-            if (MH_Initialize() == MH_OK) {
-                void* updateAddr = (void*)Scanner::Cache["kiriMoveBasic::Update"];
+            // COMMIT GAME HOOKS
+            if (game_hooks.commit() != cell::status::success) {
+                LogE("[-] GAME HOOKS FAILED! Cheat functionality might be broken.");
+            }
+            else {
+                LogI("[+] Game Hooks active. Menu & ESP enabled.");
+                MSZ_API::Initialized = true; // IMPORTANT: Let the menu open!
+            }
 
-                if (updateAddr) {
-                    MH_CreateHook(updateAddr, &kiriMoveBasic::Update, (LPVOID*)&kiriMoveBasic::oUpdate);
-                    MH_EnableHook(updateAddr);
-                    LogI("kiriMoveBasic::Update Hooked successfully.");
-                }
-                else {
-                    LogE("Critical: Scanner could not find address for kiriMoveBasic::Update");
-                    return false;
-                }
+            // =========================================================
+            // Security Hooks
+            // =========================================================
+            GetCurrentDirectoryA(MAX_PATH, g_GameDir);
+            LogI("[SECURITY] Sandbox Active. Root: %s", g_GameDir);
 
-                auto setGlobalFloatAddr = Unity::ResolveICall("UnityEngine.Shader::SetGlobalFloatImpl(System.Int32,System.Single)");
-                if (!setGlobalFloatAddr) {
-                    setGlobalFloatAddr = Unity::ResolveICall("UnityEngine.Shader::SetGlobalFloat(System.Int32,System.Single)");
-                }
+            //DebugDump("CreateFileA", (void*)&CreateFileA);
+            //DebugDump("ShellExecuteA", (void*)&ShellExecuteA);
 
-                if (setGlobalFloatAddr) {
-                    MH_CreateHook(setGlobalFloatAddr, &Unity::SetGlobalFloat_Hook, (LPVOID*)&Unity::oSetGlobalFloat);
-                    MH_EnableHook(setGlobalFloatAddr);
-                    LogI("Heartbeat (SetGlobalFloat) Hooked successfully.");
-                }
-                else {
-                    LogW("Warning: Could not find SetGlobalFloat. Main thread tasks might not process!");
-                }
+            // Add hooks to security batch
+            security_hooks.add(&ShellExecuteA, &Detour_ShellExecuteA, &fpShellExecuteA);
+            security_hooks.add(&CreateFileA, &Detour_CreateFileA, &fpCreateFileA);
 
-                LogI("MinHook: Successfully hooked kiriMoveBasic::Update");
+            HMODULE hUrlMon = LoadLibraryA("urlmon.dll");
+            if (hUrlMon) {
+                void* p = (void*)GetProcAddress(hUrlMon, "URLDownloadToFileA");
+                if (p) security_hooks.add(p, &Detour_URLDownloadToFileA, (LPVOID*)&fpURLDownloadToFileA);
+            }
 
-                GetCurrentDirectoryA(MAX_PATH, g_GameDir);
-                LogI("[SECURITY] Sandbox Active. Root: %s", g_GameDir);
+            HMODULE hWinsock = LoadLibraryA("ws2_32.dll");
+            if (hWinsock) {
+                void* p = (void*)GetProcAddress(hWinsock, "connect");
+                if (p) security_hooks.add(p, &Detour_Connect, (LPVOID*)&fpConnect);
+            }
 
-                // 1. Install Hooks
-                MH_CreateHook(&ShellExecuteA, &Detour_ShellExecuteA, (LPVOID*)&fpShellExecuteA);
-                MH_EnableHook(&ShellExecuteA);
-
-                // Hook CreateFileA (Kernel32.dll)
-                MH_CreateHook(&CreateFileA, &Detour_CreateFileA, (LPVOID*)&fpCreateFileA);
-                MH_EnableHook(&CreateFileA);
-
-                // Load extra DLLs to hook them
-                HMODULE hUrlMon = LoadLibraryA("urlmon.dll");
-                if (hUrlMon) {
-                    void* p = (void*)GetProcAddress(hUrlMon, "URLDownloadToFileA");
-                    if (p) {
-                        MH_CreateHook(p, &Detour_URLDownloadToFileA, (LPVOID*)&fpURLDownloadToFileA);
-                        MH_EnableHook(p);
-                    }
-                }
-
-                HMODULE hWinsock = LoadLibraryA("ws2_32.dll");
-                if (hWinsock) {
-                    void* p = (void*)GetProcAddress(hWinsock, "connect");
-                    if (p) {
-                        MH_CreateHook(p, &Detour_Connect, (LPVOID*)&fpConnect);
-                        MH_EnableHook(p);
-                    }
-                }
-
-                MSZ_API::Initialized = true;
-                return true;
+            // COMMIT SECURITY HOOKS
+            if (security_hooks.commit() != cell::status::success) {
+                LogW("[-] Warning: One or more Security Hooks failed.");
+                LogW("    (Likely CreateFileA due to API forwarding. Game Hooks are safe.)");
+            }
+            else {
+                LogI("[+] Security Hooks active.");
             }
         }
-        LogI("Minhook didn't initialized successfully, mods won't work.");
-        return false;
+        return true;
     }
 }
