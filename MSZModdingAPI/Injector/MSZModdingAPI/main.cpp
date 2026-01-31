@@ -4,7 +4,7 @@
 #include <vector>
 #include <thread>
 #include "Injector.h"
-#include "Security.h" // Include our new security checker
+#include "Security.h"
 
 namespace fs = std::filesystem;
 
