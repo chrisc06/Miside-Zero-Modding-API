@@ -78,6 +78,77 @@ namespace MSZ_API {
             return nullptr;
         }
 
+        bool GetKey(KeyCode key) {
+            if (Hook::Unity::GetKey) {
+                return Hook::Unity::GetKey(key);
+            }
+            return false;
+        }
+
+        bool GetKeyDown(KeyCode key)
+        {
+            if (Hook::Unity::GetKeyDown)
+                return Hook::Unity::GetKeyDown(key);
+
+            return false;
+        }
+
+        bool GetKeyUp(KeyCode key)
+        {
+            if (Hook::Unity::GetKeyUp)
+                return Hook::Unity::GetKeyUp(key);
+
+            return false;
+        }
+
+        bool GetButton(const char* name)
+        {
+            if (Hook::Unity::GetButton)
+                return Hook::Unity::GetButton(name);
+
+            return false;
+        }
+
+        bool GetButtonDown(const char* name)
+        {
+            if (Hook::Unity::GetButtonDown)
+                return Hook::Unity::GetButtonDown(name);
+
+            return false;
+        }
+
+        bool GetButtonUp(const char* name)
+        {
+            if (Hook::Unity::GetButtonUp)
+                return Hook::Unity::GetButtonUp(name);
+
+            return false;
+        }
+
+        bool GetMouseButton(int button)
+        {
+            if (Hook::Unity::GetMouseButton)
+                return Hook::Unity::GetMouseButton(button);
+
+            return false;
+        }
+
+        bool GetMouseButtonDown(int button)
+        {
+            if (Hook::Unity::GetMouseButtonDown)
+                return Hook::Unity::GetMouseButtonDown(button);
+
+            return false;
+        }
+
+        bool GetMouseButtonUp(int button)
+        {
+            if (Hook::Unity::GetMouseButtonUp)
+                return Hook::Unity::GetMouseButtonUp(button);
+
+            return false;
+        }
+
         void* GetGameObject(void* componentOrCollider) {
             if (Hook::Unity::GetGameObject && componentOrCollider) {
                 return Hook::Unity::GetGameObject(componentOrCollider);

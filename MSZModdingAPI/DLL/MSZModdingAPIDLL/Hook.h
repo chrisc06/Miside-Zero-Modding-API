@@ -64,6 +64,15 @@ namespace Hook {
         typedef void (*set_useGravity_t)(void*, bool);
         typedef void (*set_isKinematic_t)(void*, bool);
         typedef void (*LoadScene_t)(const char* sceneName);
+        typedef bool (*GetKey_t)(KeyCode key);
+        typedef bool (*GetKeyUp_t)(KeyCode key);
+        typedef bool (*GetKeyDown_t)(KeyCode key);
+        typedef bool (*GetButton_t)(const char* buttonName);
+        typedef bool (*GetButtonDown_t)(const char* buttonName);
+        typedef bool (*GetButtonUp_t)(const char* buttonName);
+        typedef bool (*GetMouseButton_t)(int button);
+        typedef bool (*GetMouseButtonDown_t)(int button);
+        typedef bool (*GetMouseButtonUp_t)(int button);
 
         extern GetMainCamera_t GetMainCamera;
         extern ScreenPointToRay_t ScreenPointToRay;
@@ -92,6 +101,15 @@ namespace Hook {
         extern set_useGravity_t SetUseGravity;
         extern set_isKinematic_t SetIsKinematic;
         extern LoadScene_t LoadScene;
+        extern GetKey_t GetKey;
+        extern GetKeyUp_t GetKeyUp;
+        extern GetKeyDown_t GetKeyDown;
+        extern GetButton_t GetButton;
+        extern GetButtonUp_t GetButtonUp;
+        extern GetButtonDown_t GetButtonDown;
+        extern GetMouseButton_t GetMouseButton;
+        extern GetMouseButtonUp_t GetMouseButtonUp;
+        extern GetMouseButtonDown_t GetMouseButtonDown;
     }
 
     namespace kiriMoveBasic {
