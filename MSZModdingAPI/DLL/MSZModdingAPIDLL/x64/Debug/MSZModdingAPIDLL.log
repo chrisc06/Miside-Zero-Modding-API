@@ -1,4 +1,4 @@
-﻿  API.cpp
+﻿  dllmain.cpp
   MSZModdingAPIDLL.vcxproj -> C:\Users\chris\source\repos\MSZModdingAPIDLL\x64\Debug\MSZModdingAPIDLL.dll
   'pwsh.exe' is not recognized as an internal or external command,
   operable program or batch file.

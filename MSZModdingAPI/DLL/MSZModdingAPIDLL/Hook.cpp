@@ -4,6 +4,7 @@
 #include "API.h"
 #include "IL2CPP_Helper.h"
 #include "Scanner.h"
+#include <chrono>
 
 namespace Hook {
     namespace Unity {
@@ -60,8 +61,24 @@ namespace Hook {
         GetMouseButton_t GetMouseButton = nullptr;
         GetMouseButtonUp_t GetMouseButtonUp = nullptr;
         GetMouseButtonDown_t GetMouseButtonDown = nullptr;
-        void SetGlobalFloat_Hook(int nameString, float value){
+        void SetGlobalFloat_Hook(int nameString, float value) {
             MSZ_API::ProcessMainThreadTasks();
+
+            static auto last = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            float dt = std::chrono::duration<float>(now - last).count();
+            last = now;
+
+            if (dt < 0.f) dt = 0.f;
+            if (dt > 0.25f) dt = 0.25f;
+
+            MSZ_API::Scheduler::Internal::Tick(dt);
+            MSZ_API::Events::Internal::Tick();
+
+            if (MSZ_API::Initialized) {
+                MSZ_API::Mods::TickUpdate();
+            }
+
             oSetGlobalFloat(nameString, value);
         }
     }
@@ -322,6 +339,8 @@ namespace Hook {
             }
 
             MSZ_API::Initialized = true;
+            MSZ_API::Mods::Init();
+
             return true;
         }
         return false;

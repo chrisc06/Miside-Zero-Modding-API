@@ -7,7 +7,10 @@
 #include <mutex>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <string>
+#include <chrono>
+#include <condition_variable>
 
 #ifdef MSZ_API_EXPORTS
 #define MSZ_API_FUNC __declspec(dllexport)
@@ -16,14 +19,22 @@
 #pragma comment(lib, "MSZModdingAPIDLL.lib")
 #endif
 
-// --- Mod Metadata Structure ---
-// Modders must implement this to appear in the active mod list
+#define MSZ_API_VERSION_STR "0.1-alpha"
+#define MSZ_API_VERSION_INT 1
+        
 struct MSZ_ModInfo {
+    uint32_t ApiVersion;
     const char* Name;
     const char* Author;
     const char* Version;
     const char* Description;
 };
+
+// Optional lifecycle exports a mod can implement
+typedef void (*MSZ_OnLoad_t)();
+typedef void (*MSZ_OnUnload_t)();
+typedef void (*MSZ_OnUpdate_t)();
+typedef void (*MSZ_OnGUI_t)();
 
 // --- Log Helpers ---
 inline void _LogGeneric(int color, const char* prefix, const char* format, va_list args) {
@@ -456,17 +467,24 @@ namespace MSZ_API {
     MSZ_API_FUNC void RunOnMainThread(std::function<void()> task);
     MSZ_API_FUNC extern bool Initialized;
 
-    // --- NEW: Mod Registry ---
     struct ActiveMod {
         HMODULE hModule;
         MSZ_ModInfo info;
     };
 
-    // Allows the API to track all loaded DLLs and their info
     MSZ_API_FUNC std::vector<ActiveMod> GetLoadedMods();
 
+    static void __cdecl MSZ_SehTranslator(unsigned int code, EXCEPTION_POINTERS* /*p*/);
+    static void MSZ_InstallSehTranslatorOnce();
+
+    namespace Mods {
+        MSZ_API_FUNC void Init();
+        MSZ_API_FUNC void TickUpdate();
+        MSZ_API_FUNC void TickGUI();
+        MSZ_API_FUNC void Shutdown();
+    }
+
     namespace UI {
-        // --- Core System ---
         MSZ_API_FUNC void RegisterMenu(std::function<void()> callback);
         MSZ_API_FUNC void SetMenuOpen(bool open);
         MSZ_API_FUNC bool IsMenuOpen();
@@ -476,7 +494,6 @@ namespace MSZ_API {
             void RenderAll();
         }
 
-        // --- Wrappers ---
         MSZ_API_FUNC bool Begin(const char* name);
         MSZ_API_FUNC void End();
         MSZ_API_FUNC void Separator();
@@ -545,4 +562,44 @@ namespace MSZ_API {
         extern MSZ_API_FUNC float currentSpeed;
         extern MSZ_API_FUNC bool isSpeedModified;
     }
+
+    // --- Mod Discovery (cached) ---
+    MSZ_API_FUNC std::vector<ActiveMod> GetLoadedModsCached(bool refresh = false);
+
+    // --- Events ---
+    namespace Events {
+        using Handler = std::function<void()>;
+        using KeyHandler = std::function<void(KeyCode)>;
+
+        // Subscribe (callbacks run on main thread)
+        MSZ_API_FUNC void OnUpdate(const Handler& fn);
+        MSZ_API_FUNC void OnGUI(const Handler& fn);
+        MSZ_API_FUNC void OnKeyDown(const KeyHandler& fn);
+
+        // Internal (called by the framework)
+        namespace Internal {
+            void Tick();
+            void TickGUI();
+            void DispatchKeyDown(KeyCode key);
+            void ClearAll();
+        }
+    }
+
+    // --- Scheduler (main thread) ---
+    namespace Scheduler {
+        using Task = std::function<void()>;
+        using TaskId = uint64_t;
+
+        MSZ_API_FUNC TaskId RunAfter(float seconds, Task fn);
+        MSZ_API_FUNC TaskId RunEvery(float seconds, Task fn);
+        MSZ_API_FUNC TaskId RunNextFrame(Task fn);
+        MSZ_API_FUNC void   Cancel(TaskId id);
+
+        namespace Internal {
+            void Tick(float unscaledDeltaSeconds);
+            void ClearAll();
+        }
+    }
+
+    MSZ_API_FUNC void RunOnMainThreadAndWait(const std::function<void()>& task);
 }

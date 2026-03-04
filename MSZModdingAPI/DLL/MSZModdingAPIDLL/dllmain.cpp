@@ -36,53 +36,90 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
-HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
-    if (!g_Init) {
-        if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice))) {
+HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
+{
+    if (!g_Init)
+    {
+        if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice)))
+        {
             g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
+
             DXGI_SWAP_CHAIN_DESC sd;
             pSwapChain->GetDesc(&sd);
             window = sd.OutputWindow;
 
             ID3D11Texture2D* pBackBuffer;
             pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+
             g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
             pBackBuffer->Release();
 
             oWndProc = (WNDPROC)SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)WndProc);
 
             ImGui::CreateContext();
+
             ImGuiIO& io = ImGui::GetIO();
             io.ConfigFlags = ImGuiConfigFlags_NoMouseCursorChange;
 
             ImGui::StyleColorsDark();
+
             ImGui_ImplWin32_Init(window);
             ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext);
+
             g_Init = true;
         }
-        else return oPresent(pSwapChain, SyncInterval, Flags);
+        else
+        {
+            return oPresent(pSwapChain, SyncInterval, Flags);
+        }
     }
+
+    // -----------------------------
+    // FRAME TIME
+    // -----------------------------
+
+    static auto last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+
+    float dt = std::chrono::duration<float>(now - last).count();
+    last = now;
+
+    if (dt < 0.f) dt = 0.f;
+    if (dt > 0.25f) dt = 0.25f;
+
+    // -----------------------------
+    // API CORE TICKS
+    // -----------------------------
+
+    MSZ_API::ProcessMainThreadTasks();
+
+    MSZ_API::Scheduler::Internal::Tick(dt);
+    MSZ_API::Events::Internal::Tick();
+
+    if (MSZ_API::Initialized)
+    {
+        MSZ_API::Mods::TickUpdate();
+    }
+
+    // -----------------------------
+    // IMGUI FRAME START
+    // -----------------------------
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-
-    if (MSZ_API::UI::IsMenuOpen()) {
-        ImGui::GetIO().MouseDrawCursor = true;
-    }
-    else {
-        ImGui::GetIO().MouseDrawCursor = false;
-    }
-
     MSZ_API::UI::Internal::RenderAll();
 
+    ImGui::GetIO().MouseDrawCursor = MSZ_API::UI::IsMenuOpen();
+
     ImGui::Render();
+
     g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
-
 uintptr_t GetD3D11PresentAddress() {
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, DefWindowProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "DX11 Dummy", NULL };
     RegisterClassEx(&wc);
@@ -157,19 +194,31 @@ void MainThread(HMODULE hModule) {
     }
 
     Hook::InitAll((uintptr_t)hGameAssembly);
+    MSZ_API::Mods::Init();
     InitDirectXHook();
 
     while (true) Sleep(100);
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved) {
-    switch (ul_reason_for_call) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+{
+    switch (ul_reason_for_call)
+    {
     case DLL_PROCESS_ATTACH:
         InitCrashHandler();
-        CreateThread(0, 0, (LPTHREAD_START_ROUTINE)MainThread, hModule, 0, 0);
-        break;
+        CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)MainThread, hModule, 0, nullptr);
+        break;      
+
     case DLL_PROCESS_DETACH:
+        if (MSZ_API::Initialized)
+        {
+            MSZ_API::Mods::Shutdown();
+            MSZ_API::Events::Internal::ClearAll();
+            MSZ_API::Scheduler::Internal::ClearAll();
+            MSZ_API::Initialized = false;
+        }
         break;
     }
+
     return TRUE;
 }

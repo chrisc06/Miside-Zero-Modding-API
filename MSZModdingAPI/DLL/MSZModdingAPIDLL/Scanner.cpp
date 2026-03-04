@@ -1,9 +1,12 @@
 #include "Scanner.h"
 #include "Hook.h"
 #include "API.h"
+#include <mutex>
 
 void Scanner::Initialize() {
     using namespace Hook::Unity;
+
+    std::lock_guard<std::mutex> lock(CacheMutex);
 
     // --- Original Gameplay Scans ---
     Cache["kiriMoveBasic::Update"] = GetMethod("Assembly-CSharp", "", "kiriMoveBasic", "Update", 0);
@@ -62,4 +65,4 @@ void* Scanner::GetClass(const char* assemblyName, const char* namespaze, const c
 
     void* image = Hook::Unity::assembly_get_image(assembly);
     return Hook::Unity::class_from_name(image, namespaze, className);
-}
+}   

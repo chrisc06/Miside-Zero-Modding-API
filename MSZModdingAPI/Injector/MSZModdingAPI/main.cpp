@@ -4,12 +4,15 @@
 #include <vector>
 #include <thread>
 #include "Injector.h"
-#include "Security.h"
+#include "Security.h" 
 
 namespace fs = std::filesystem;
 
-const char* REQUIRED_EXPORT = "MSZ_Mod_Entry";
+const char* REQUIRED_EXPORT = "MSZ_GetModInfo";
+const char* REQUIRED_ENTRY_EXPORT = "MSZ_OnLoad";
 const char* MODS_FOLDER = "Mods";
+
+std::vector<fs::path> dlls;
 
 int main() {
     const char* targetExe = "MiSide Zero.exe";
@@ -41,22 +44,34 @@ int main() {
 
     for (const auto& entry : fs::directory_iterator(MODS_FOLDER)) {
         if (entry.path().extension() == ".dll") {
-            std::string dllPath = entry.path().string();
-            std::string dllName = entry.path().filename().string();
+            dlls.push_back(entry.path());
+        }
+    }
 
-            std::cout << "  [?] Checking: " << dllName << "... ";
+    std::sort(dlls.begin(), dlls.end(),
+        [](const fs::path& a, const fs::path& b) {
+            std::string as = a.filename().string();
+            std::string bs = b.filename().string();
+            std::transform(as.begin(), as.end(), as.begin(), ::tolower);
+            std::transform(bs.begin(), bs.end(), bs.begin(), ::tolower);
+            return as < bs;
+        });
 
-            // SECURITY CHECK: Does it have the ModInfo struct?
-            if (!DllSecurity::IsValidMod(dllPath)) {
-                // REJECTED
-                std::cout << "[BLOCKED]" << std::endl;
-                std::cout << "      -> Missing 'MSZ_GetModInfo'. This DLL is not a valid mod." << std::endl;
-                continue;
-            }
+    for (auto& p : dlls) {
+        std::string dllPath = fs::absolute(p).string();
+        std::string dllName = p.filename().string();
+         
+        std::cout << "  [?] Checking: " << dllName << "... ";
 
-            // APPROVED
-            std::cout << "[VERIFIED] -> Injecting..." << std::endl;
-            Injector::InjectDLL(pi.dwProcessId, dllPath.c_str());
+        if (!DllSecurity::IsValidMod(dllPath)) {
+            std::cout << "[BLOCKED]\n";
+            std::cout << "      -> Missing '" << REQUIRED_EXPORT << "'.\n";
+            continue;
+        }
+
+        std::cout << "[VERIFIED] -> Injecting...\n";
+        if (!Injector::InjectDLL(pi.dwProcessId, dllPath.c_str())) {
+            std::cout << "      -> [!] Injection failed\n";
         }
     }
 

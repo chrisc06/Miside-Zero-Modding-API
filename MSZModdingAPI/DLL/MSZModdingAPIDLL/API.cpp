@@ -13,6 +13,11 @@
 #include <vector>
 #include <fstream>
 #include <map>
+#include <unordered_map>
+#include <condition_variable>
+#include <chrono>
+#include <atomic>
+#include <algorithm>
 #include "Scanner.h"
 #include "imgui/imgui.h"
 #include <mutex>
@@ -23,23 +28,23 @@ namespace MSZ_API {
     std::mutex queueMutex;
     bool Initialized = false;
 
-    // This scans the process memory to find every mod the Launcher injected
+    static std::mutex g_modListMutex;
+    static std::vector<ActiveMod> g_cachedMods;
+    static bool g_modsScanned = false;
+
     std::vector<ActiveMod> GetLoadedMods() {
         std::vector<ActiveMod> mods;
         HMODULE hMods[1024];
         HANDLE hProcess = GetCurrentProcess();
         DWORD cbNeeded;
 
-        // 1. Get a handle to every DLL loaded in the game
         if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
             unsigned int count = cbNeeded / sizeof(HMODULE);
 
-            for (unsigned int i = 0; i < count; i++) {
-                // 2. Check if the DLL has our signature export "MSZ_GetModInfo"
+            for (unsigned int i = 0; i < count; i++){
                 typedef MSZ_ModInfo(*GetInfo_t)();
                 GetInfo_t getInfo = (GetInfo_t)GetProcAddress(hMods[i], "MSZ_GetModInfo");
 
-                // 3. If it does, call it to get the Name, Author, etc.
                 if (getInfo) {
                     MSZ_ModInfo info = getInfo();
 
@@ -52,6 +57,15 @@ namespace MSZ_API {
             }
         }
         return mods;
+    }
+
+    std::vector<ActiveMod> GetLoadedModsCached(bool refresh) {
+        std::lock_guard<std::mutex> lock(g_modListMutex);
+        if (!g_modsScanned || refresh) {
+            g_cachedMods = GetLoadedMods();
+            g_modsScanned = true;
+        }
+        return g_cachedMods;
     }
 
     void ProcessMainThreadTasks() {
@@ -68,6 +82,310 @@ namespace MSZ_API {
     void RunOnMainThread(std::function<void()> task) {
         std::lock_guard<std::mutex> lock(queueMutex);
         mainThreadQueue.push(task);
+    }
+
+    void RunOnMainThreadAndWait(const std::function<void()>& task) {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+
+        RunOnMainThread([&]() {
+            task();
+            {
+                std::lock_guard<std::mutex> lk(m);
+                done = true;
+            }
+            cv.notify_one();
+            });
+
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return done; });
+    }
+
+    static void __cdecl MSZ_SehTranslator(unsigned int code, EXCEPTION_POINTERS* /*p*/) {
+        throw std::runtime_error("SEH exception code: " + std::to_string(code));
+    }
+
+    static void MSZ_InstallSehTranslatorOnce() {
+        static bool done = false;
+        if (!done) {    
+            _set_se_translator(MSZ_SehTranslator);
+            done = true;
+        }
+    }
+
+    namespace Mods {
+
+        struct ModLifecycle {
+            ActiveMod mod;
+            MSZ_OnLoad_t   onLoad = nullptr;
+            MSZ_OnUpdate_t onUpdate = nullptr;
+            MSZ_OnGUI_t    onGUI = nullptr;
+            MSZ_OnUnload_t onUnload = nullptr;
+            bool calledLoad = false;
+        };
+
+        static std::vector<ModLifecycle> g_mods;
+        static std::mutex g_modsMutex;
+        static bool g_inited = false;
+
+        static void Resolve(ModLifecycle& m) {
+            if (!m.mod.hModule) return;
+
+            m.onLoad = (MSZ_OnLoad_t)GetProcAddress(m.mod.hModule, "MSZ_OnLoad");
+            m.onUpdate = (MSZ_OnUpdate_t)GetProcAddress(m.mod.hModule, "MSZ_OnUpdate");
+            m.onGUI = (MSZ_OnGUI_t)GetProcAddress(m.mod.hModule, "MSZ_OnGUI");
+            m.onUnload = (MSZ_OnUnload_t)GetProcAddress(m.mod.hModule, "MSZ_OnUnload");
+
+            LogI("Resolve %s: OnLoad=%p OnUpdate=%p OnGUI=%p OnUnload=%p",
+                m.mod.info.Name ? m.mod.info.Name : "(unknown)",
+                m.onLoad, m.onUpdate, m.onGUI, m.onUnload);
+        }
+
+        static void SafeInvoke(const char* phase, ModLifecycle* pm, void(*fn)()) {
+            if (!pm || !fn) return;
+            try {
+                fn();
+            }
+            catch (const std::exception& e) {
+                LogE("Mod %s threw std::exception (%s): %s",
+                    phase,
+                    pm->mod.info.Name ? pm->mod.info.Name : "(unknown)",
+                    e.what());
+            }
+            catch (...) {
+                LogE("Mod %s crashed (%s)",
+                    phase,
+                    pm->mod.info.Name ? pm->mod.info.Name : "(unknown)");
+            }
+        }
+
+        void Init() {
+            std::vector<ModLifecycle*> toLoad;
+
+            {
+                std::lock_guard<std::mutex> lock(g_modsMutex);
+                if (g_inited) return;
+
+                auto mods = GetLoadedModsCached(true);
+
+                g_mods.clear();
+                g_mods.reserve(mods.size());
+
+                for (auto& am : mods) {
+                    ModLifecycle ml;
+                    ml.mod = am;
+                    Resolve(ml);
+                    g_mods.push_back(ml);
+                }
+
+                for (auto& m : g_mods) {
+                    if (m.onLoad && !m.calledLoad) {
+                        m.calledLoad = true;
+                        toLoad.push_back(&m);
+                    }
+                }
+
+                g_inited = true;
+                LogI("Mods lifecycle initialized (%zu mods)", g_mods.size());
+            }
+
+            // schedule OnLoad on main thread (outside lock)
+            for (auto* pm : toLoad) {
+                RunOnMainThread([pm]() {
+                    SafeInvoke("OnLoad", pm, pm->onLoad);
+                    });
+            }
+        }
+
+        void TickUpdate() {
+            std::vector<ModLifecycle*> list;
+
+            {
+                std::lock_guard<std::mutex> lock(g_modsMutex);
+                if (!g_inited) return;
+                list.reserve(g_mods.size());
+                for (auto& m : g_mods) if (m.onUpdate) list.push_back(&m);
+            }
+
+            for (auto* pm : list) {
+                SafeInvoke("OnUpdate", pm, pm->onUpdate);
+            }
+        }
+
+        void TickGUI() {
+            std::vector<ModLifecycle*> list;
+
+            {
+                std::lock_guard<std::mutex> lock(g_modsMutex);
+                if (!g_inited) return;
+                list.reserve(g_mods.size());
+                for (auto& m : g_mods) if (m.onGUI) list.push_back(&m);
+            }
+
+            for (auto* pm : list) {
+                SafeInvoke("OnGUI", pm, pm->onGUI);
+            }
+        }
+
+        void Shutdown() {
+            std::vector<ModLifecycle*> toUnload;
+
+            {
+                std::lock_guard<std::mutex> lock(g_modsMutex);
+                if (!g_inited) return;
+
+                toUnload.reserve(g_mods.size());
+                for (auto& m : g_mods) if (m.onUnload) toUnload.push_back(&m);
+
+                g_inited = false;
+            }
+
+            // call unload outside lock
+            for (auto* pm : toUnload) {
+                SafeInvoke("OnUnload", pm, pm->onUnload);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_modsMutex);
+                g_mods.clear();
+            }
+
+            LogI("Mods lifecycle shutdown");
+        }
+    }
+
+    namespace Events {
+        static std::mutex g_evtMutex;
+        static std::vector<Handler> g_onUpdate;
+        static std::vector<Handler> g_onGUI;
+        static std::vector<KeyHandler> g_onKeyDown;
+
+        void OnUpdate(const Handler& fn) {
+            std::lock_guard<std::mutex> lock(g_evtMutex);
+            g_onUpdate.push_back(fn);
+        }
+        void OnGUI(const Handler& fn) {
+            std::lock_guard<std::mutex> lock(g_evtMutex);
+            g_onGUI.push_back(fn);
+        }
+        void OnKeyDown(const KeyHandler& fn) {
+            std::lock_guard<std::mutex> lock(g_evtMutex);
+            g_onKeyDown.push_back(fn);
+        }
+
+        namespace Internal {
+            void Tick() {
+                std::vector<Handler> copy;
+                {
+                    std::lock_guard<std::mutex> lock(g_evtMutex);
+                    copy = g_onUpdate;
+                }
+                for (auto& fn : copy) if (fn) fn();
+            }
+
+            void TickGUI() {
+                std::vector<Handler> copy;
+                {
+                    std::lock_guard<std::mutex> lock(g_evtMutex);
+                    copy = g_onGUI;
+                }
+                for (auto& fn : copy) if (fn) fn();
+            }
+
+            void DispatchKeyDown(KeyCode key) {
+                std::vector<KeyHandler> copy;
+                {
+                    std::lock_guard<std::mutex> lock(g_evtMutex);
+                    copy = g_onKeyDown;
+                }
+                for (auto& fn : copy) if (fn) fn(key);
+            }
+
+            void ClearAll() {
+                std::lock_guard<std::mutex> lock(g_evtMutex);
+                g_onUpdate.clear();
+                g_onGUI.clear();
+                g_onKeyDown.clear();
+            }
+        }
+    }
+
+    namespace Scheduler {
+        struct ScheduledTask {
+            TaskId id;
+            Task fn;
+            float interval;
+            float remaining;
+            bool cancelled;
+        };
+
+        static std::mutex g_schedMutex;
+        static std::vector<ScheduledTask> g_tasks;
+        static std::atomic<uint64_t> g_nextId{ 1 };
+
+        static TaskId Add(float seconds, float interval, Task fn) {
+            ScheduledTask t;
+            t.id = g_nextId.fetch_add(1);
+            t.fn = std::move(fn);
+            t.interval = interval;
+            t.remaining = seconds;
+            t.cancelled = false;
+            std::lock_guard<std::mutex> lock(g_schedMutex);
+            g_tasks.push_back(std::move(t));
+            return g_tasks.back().id;
+        }
+
+        TaskId RunAfter(float seconds, Task fn) {
+            if (seconds < 0.f) seconds = 0.f;
+            return Add(seconds, 0.f, std::move(fn));
+        }
+
+        TaskId RunEvery(float seconds, Task fn) {
+            if (seconds < 0.01f) seconds = 0.01f;
+            return Add(seconds, seconds, std::move(fn));
+        }
+
+        TaskId RunNextFrame(Task fn) {
+            return Add(0.f, 0.f, std::move(fn));
+        }
+
+        void Cancel(TaskId id) {
+            std::lock_guard<std::mutex> lock(g_schedMutex);
+            for (auto& t : g_tasks) if (t.id == id) t.cancelled = true;
+        }
+
+        namespace Internal {
+            void Tick(float unscaledDeltaSeconds) {
+                std::vector<Task> toRun;
+                {
+                    std::lock_guard<std::mutex> lock(g_schedMutex);
+                    for (auto& t : g_tasks) {
+                        if (t.cancelled) continue;
+                        t.remaining -= unscaledDeltaSeconds;
+                        if (t.remaining <= 0.f) {
+                            if (t.fn) toRun.push_back(t.fn);
+                            if (t.interval > 0.f) {
+                                t.remaining += t.interval;
+                            }
+                            else {
+                                t.cancelled = true;
+                            }
+                        }
+                    }
+
+                    g_tasks.erase(std::remove_if(g_tasks.begin(), g_tasks.end(),
+                        [](const ScheduledTask& t) { return t.cancelled; }),
+                        g_tasks.end());
+                }
+                for (auto& fn : toRun) fn();
+            }
+
+            void ClearAll() {
+                std::lock_guard<std::mutex> lock(g_schedMutex);
+                g_tasks.clear();
+            }
+        }
     }
 
     namespace Unity {
@@ -235,18 +553,24 @@ namespace MSZ_API {
         }
 
         namespace TypeCache {
-            std::map<std::string, void*> cache;
+            static std::unordered_map<std::string, void*> cache;
+            static std::mutex cacheMutex;
 
             void* Get(const char* assemblyQualifiedName) {
-                auto it = cache.find(assemblyQualifiedName);
-                if (it != cache.end()) {
-                    return it->second;
+                if (!assemblyQualifiedName) return nullptr;
+
+                {
+                    std::lock_guard<std::mutex> lock(cacheMutex);
+                    auto it = cache.find(assemblyQualifiedName);
+                    if (it != cache.end()) return it->second;
                 }
 
+                // Resolve without holding the lock (potentially expensive)
                 void* typeObj = GetTypeObject(assemblyQualifiedName);
-                if (typeObj) {
-                    cache[assemblyQualifiedName] = typeObj;
-                }
+                if (!typeObj) return nullptr;
+
+                std::lock_guard<std::mutex> lock(cacheMutex);
+                cache[assemblyQualifiedName] = typeObj;
                 return typeObj;
             }
         }
@@ -315,7 +639,7 @@ namespace MSZ_API {
         bool Raycast(Ray* ray, float distance, RaycastHit* hit, int layerMask, int interaction) {
             if (!Hook::Unity::Raycast || !Hook::Unity::get_defaultPhysicsScene) return false;
 
-           if (abs(ray->direction.x) < 0.001f && abs(ray->direction.y) < 0.001f && abs(ray->direction.z) < 0.001f) {
+            if (abs(ray->direction.x) < 0.001f && abs(ray->direction.y) < 0.001f && abs(ray->direction.z) < 0.001f) {
                 return false;
             }
 
@@ -387,8 +711,8 @@ namespace MSZ_API {
                    // if (il2cppStr) {
                     //    LogI("API: Calling LoadScene for '%s'", sceneName);
                         // Direct call to the methodPointer
-                        Hook::Unity::LoadScene(sceneName);
-                   // }
+                    Hook::Unity::LoadScene(sceneName);
+                    // }
                 }
                 else {
                     LogE("API: LoadScene call failed. Scanner could not find the method pointer.");
@@ -426,7 +750,7 @@ namespace MSZ_API {
         void ToggleMenu() { m_ShowMenu = !m_ShowMenu; }
 
         bool Begin(const char* name) {
-                return ImGui::Begin(name, nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+            return ImGui::Begin(name, nullptr, ImGuiWindowFlags_AlwaysAutoResize);
         }
 
         void End() {
@@ -466,12 +790,18 @@ namespace MSZ_API {
 
         bool InputText(const char* label, char* buf, size_t buf_size) {
             return ImGui::InputText(label, buf, buf_size);
-        }\
+        }
 
         namespace Internal {
             void RenderAll() {
                 if (!m_ShowMenu) return;
                 std::lock_guard<std::mutex> lock(m_RenderMutex);
+
+                MSZ_API::Events::Internal::TickGUI();
+
+                if (MSZ_API::Initialized) {
+                    MSZ_API::Mods::TickGUI();
+                }
 
                 for (const auto& drawFunc : m_DrawCallbacks) {
                     if (drawFunc) drawFunc();
@@ -543,7 +873,7 @@ namespace MSZ_API {
         float GetPlayerMovementSpeed() {
             if (Hook::kiriMoveBasic::speedPtr != nullptr) {
                 return *Hook::kiriMoveBasic::speedPtr;
-            }   
+            }
             return 0;
         }
 
