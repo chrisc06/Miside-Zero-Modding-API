@@ -1,6 +1,6 @@
 # MSZ Modding API (C++ / Unity IL2CPP)
 
-# ⚠️ This project is still considered WIP and alot has to be added. It works, its usable to some extent but more has to be added.
+# ⚠️ This project has been put on pause for the time being, its functional, has some support to this point but requires manual setup up.
 
 A lightweight **C++ modding API** for a Unity (IL2CPP) game, built to save time while making mods for the game.
 
